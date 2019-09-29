@@ -4,10 +4,12 @@ import (
 	"github.com/matishsiao/go_reuseport"
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/net/ipv4"
 	"log"
 	"net"
 	"os"
 	"sync"
+	"syscall"
 )
 
 const (
@@ -29,16 +31,22 @@ type DataPacket struct {
 	packetLen int
 }
 
+type SocketMessages struct {
+	messages []ipv4.Message
+	msgCount int
+}
+
 var packetPool *sync.Pool
+var messagesPool *sync.Pool
 
 var tunInterface *water.Interface
-var udpListenConn net.PacketConn
+var udpListenConn *ipv4.PacketConn
 var udpWriterConn net.PacketConn
 var tunLink netlink.Link
 var tunReadChan chan *DataPacket = make(chan *DataPacket, 1000)
-var udpReadChan chan *DataPacket = make(chan *DataPacket, 1000)
+var udpReadChan chan *SocketMessages = make(chan *SocketMessages, 1000)
 
-func initPool() {
+func initPacketPool() {
 	packetPool = &sync.Pool{
 		New: func() interface{} {
 			return &DataPacket{data: make([]byte, mtu), packetLen: 0}
@@ -46,8 +54,24 @@ func initPool() {
 	}
 }
 
+func initMessagesPool() {
+	messagesPool = &sync.Pool{
+		New: func() interface{} {
+			ms := make([]ipv4.Message, 25)
+			for i := 0; i < len(ms); i++ {
+				ms[i] = ipv4.Message{
+					OOB:     make([]byte, 10),
+					Buffers: [][]byte{make([]byte, mtu)},
+				}
+			}
+			return &SocketMessages{messages: ms, msgCount: 0}
+		},
+	}
+}
+
 func init() {
-	initPool()
+	initPacketPool()
+	initMessagesPool()
 }
 
 func getDataPacket() *DataPacket {
@@ -56,6 +80,14 @@ func getDataPacket() *DataPacket {
 
 func putDataPacket(p *DataPacket) {
 	packetPool.Put(p)
+}
+
+func getSocketMessages() *SocketMessages {
+	return messagesPool.Get().(*SocketMessages)
+}
+
+func putSocketMessages(p *SocketMessages) {
+	messagesPool.Put(p)
 }
 
 func runTunReadThread() {
@@ -77,13 +109,18 @@ func runTunReadThread() {
 
 func runTunWriteThread() {
 	go func() {
-		for pkt := range udpReadChan {
-			_, err := tunInterface.Write(pkt.data[:pkt.packetLen])
-			putDataPacket(pkt)
-			if err != nil {
-				log.Fatal("Tun Interface Write: type unknown %+v\n", err)
+		for ms := range udpReadChan {
+			for i := 0; i < ms.msgCount; i++ {
+				plen := ms.messages[i].N
+				if 0 == plen {
+					continue
+				}
+				_, err := tunInterface.Write(ms.messages[i].Buffers[0][:plen])
+				if err != nil {
+					log.Fatal("Tun Interface Write: type unknown %+v\n", err)
+				}
+				//log.Printf("TUN packet sent\n")
 			}
-			//log.Printf("TUN packet sent\n")
 		}
 	}()
 }
@@ -132,17 +169,15 @@ func createTun(ip net.IP) {
 
 func runUDPReadThread() {
 	go func() {
-		packet := make([]byte, mtu)
 		for {
-			plen, _, err := udpListenConn.ReadFrom(packet)
+			ms := getSocketMessages()
+			msgCount, err := udpListenConn.ReadBatch(ms.messages, syscall.MSG_WAITFORONE)
 			if err != nil {
 				log.Fatal("UDP Interface Read: type unknown %+v\n", err)
 			}
-			dataPacket := getDataPacket()
-			copy(dataPacket.data, packet[:plen])
-			dataPacket.packetLen = plen
-			udpReadChan <- dataPacket
-			//log.Printf("UDP packet received\n")
+			ms.msgCount = msgCount
+			udpReadChan <- ms
+			//log.Printf("UDP packets received\n")
 		}
 	}()
 }
@@ -171,7 +206,7 @@ func createUDPListener(addrStr string) {
 		log.Fatal("Unable to open UDP listening socket for addr %s: %+v\n", addrStr, err)
 	}
 	log.Printf("Listening UDP: %s\n", addrStr)
-	udpListenConn = conn
+	udpListenConn = ipv4.NewPacketConn(conn)
 }
 
 func createUDPWriter(addrStr string) {
