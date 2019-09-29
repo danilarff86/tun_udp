@@ -4,9 +4,11 @@ import (
 	"github.com/matishsiao/go_reuseport"
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
+	lfqueue "github.com/xiaonanln/go-lockfree-queue"
 	"log"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 )
 
@@ -35,8 +37,8 @@ var tunInterface *water.Interface
 var udpListenConn net.PacketConn
 var udpWriterConn net.PacketConn
 var tunLink netlink.Link
-var tunReadChan chan *DataPacket = make(chan *DataPacket, 1000)
-var udpReadChan chan *DataPacket = make(chan *DataPacket, 1000)
+var tunReadChan *lfqueue.Queue = lfqueue.NewQueue(1000)
+var udpReadChan *lfqueue.Queue = lfqueue.NewQueue(1000)
 
 func initPool() {
 	packetPool = &sync.Pool{
@@ -69,7 +71,10 @@ func runTunReadThread() {
 			dataPacket := getDataPacket()
 			copy(dataPacket.data, packet[:plen])
 			dataPacket.packetLen = plen
-			tunReadChan <- dataPacket
+			ok := tunReadChan.Put(dataPacket)
+			if !ok {
+				log.Printf("TUN read queue is FULL")
+			}
 			//log.Printf("TUN packet received\n")
 		}
 	}()
@@ -77,13 +82,19 @@ func runTunReadThread() {
 
 func runTunWriteThread() {
 	go func() {
-		for pkt := range udpReadChan {
-			_, err := tunInterface.Write(pkt.data[:pkt.packetLen])
-			putDataPacket(pkt)
-			if err != nil {
-				log.Fatal("Tun Interface Write: type unknown %+v\n", err)
+		for {
+			elem, ok := udpReadChan.Get()
+			if ok {
+				pkt := elem.(*DataPacket)
+				_, err := tunInterface.Write(pkt.data[:pkt.packetLen])
+				putDataPacket(pkt)
+				if err != nil {
+					log.Fatal("Tun Interface Write: type unknown %+v\n", err)
+				}
+				//log.Printf("TUN packet sent\n")
+			} else {
+				runtime.Gosched()
 			}
-			//log.Printf("TUN packet sent\n")
 		}
 	}()
 }
@@ -141,7 +152,10 @@ func runUDPReadThread() {
 			dataPacket := getDataPacket()
 			copy(dataPacket.data, packet[:plen])
 			dataPacket.packetLen = plen
-			udpReadChan <- dataPacket
+			ok := udpReadChan.Put(dataPacket)
+			if !ok {
+				log.Printf("TUN read queue is FULL")
+			}
 			//log.Printf("UDP packet received\n")
 		}
 	}()
@@ -154,13 +168,19 @@ func runUDPWriteThread(addrStr string) {
 	}
 
 	go func() {
-		for pkt := range tunReadChan {
-			_, err := udpWriterConn.WriteTo(pkt.data[:pkt.packetLen], addr)
-			putDataPacket(pkt)
-			if err != nil {
-				log.Fatal("UDP Interface Write: type unknown %+v\n", err)
+		for {
+			elem, ok := tunReadChan.Get()
+			if ok {
+				pkt := elem.(*DataPacket)
+				_, err := udpWriterConn.WriteTo(pkt.data[:pkt.packetLen], addr)
+				putDataPacket(pkt)
+				if err != nil {
+					log.Fatal("UDP Interface Write: type unknown %+v\n", err)
+				}
+				//log.Printf("UDP packet sent\n")
+			} else {
+				runtime.Gosched()
 			}
-			//log.Printf("UDP packet sent\n")
 		}
 	}()
 }
