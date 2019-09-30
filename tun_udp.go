@@ -104,7 +104,7 @@ func runTunWriteThread() {
 			_, err := tunInterface.Write(pkt.data[:pkt.packetLen])
 			putDataPacket(pkt)
 			if err != nil {
-				log.Fatal("Tun Interface Write: type unknown %+v\n", err)
+				log.Fatalf("Tun Interface Write: type unknown %+v\n", err)
 			}
 			//log.Printf("TUN packet sent\n")
 		}
@@ -141,7 +141,7 @@ func createTun(ip net.IP) {
 	var err error
 	tunInterface, err = water.New(config)
 	if nil != err {
-		log.Fatal("Tun interface init(), Unable to allocate TUN interface: %+v\n", err)
+		log.Fatalf("Tun interface init(), Unable to allocate TUN interface: %+v\n", err)
 	}
 
 	link, err := netlink.LinkByName(tunName)
@@ -167,7 +167,7 @@ func createTun(ip net.IP) {
 
 	err = netlink.LinkSetUp(link)
 	if nil != err {
-		log.Fatal("Tun interface Up() Unable to UP interface\n")
+		log.Fatalf("Tun interface Up() Unable to UP interface\n")
 	}
 	log.Printf("Tun interface %s Up() Tun(%s) interface with %s\n", tunName, tunNetwork.IP.String(), tunNetwork.String())
 }
@@ -179,7 +179,7 @@ func runUDPReadThread() {
 		for {
 			plen, _, _, err := udpListenConn.ReadFrom(packet)
 			if err != nil {
-				log.Fatal("UDP Interface Read: type unknown %+v\n", err)
+				log.Fatalf("UDP Interface Read: type unknown %+v\n", err)
 			}
 			dataPacket := getDataPacket()
 			copy(dataPacket.data, packet[:plen])
@@ -210,7 +210,7 @@ func runUDPReadBatchThread() {
 func runUDPWriteThread(addrStr string) {
 	addr, err := net.ResolveUDPAddr("", addrStr)
 	if err != nil {
-		log.Fatal("Unable to resolve UDP address %s: %+v\n", addrStr, err)
+		log.Fatalf("Unable to resolve UDP address %s: %+v\n", addrStr, err)
 	}
 
 	go func() {
@@ -219,7 +219,7 @@ func runUDPWriteThread(addrStr string) {
 			_, err := udpWriterConn.WriteTo(pkt.data[:pkt.packetLen], addr)
 			putDataPacket(pkt)
 			if err != nil {
-				log.Fatal("UDP Interface Write: type unknown %+v\n", err)
+				log.Fatalf("UDP Interface Write: type unknown %+v\n", err)
 			}
 			//log.Printf("UDP packet sent\n")
 		}
@@ -242,14 +242,14 @@ func createUDPListener(addrStr string) {
 func createUDPWriter(addrStr string) {
 	conn, err := reuseport.NewReusableUDPPortConn("udp", addrStr)
 	if err != nil {
-		log.Fatal("Unable to open UDP writing socket for addr %s: %+v\n", addrStr, err)
+		log.Fatalf("Unable to open UDP writing socket for addr %s: %+v\n", addrStr, err)
 	}
 	log.Printf("UDP writing conn: %s\n", addrStr)
 	udpWriterConn = conn
 }
 
 func usageString() {
-	log.Fatal("Usage: %s server|client\n", os.Args[0])
+	log.Fatalf("Usage: %s server|client\n", os.Args[0])
 }
 
 func getMessageBuffer(size int) []ipv4.Message {
