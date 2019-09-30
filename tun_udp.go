@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const (
@@ -97,6 +98,24 @@ func runTunReadThread() {
 	}()
 }
 
+func runTunReadBatchThread(pc *PacketCollector) {
+	go func(pc *PacketCollector) {
+		runtime.LockOSThread()
+		var packet = make([]byte, mtu)
+		for {
+			plen, err := tunInterface.Read(packet)
+			if err != nil {
+				log.Fatalf("Tun Interface Read: type unknown %+v\n", err)
+			}
+			dataPacket := getDataPacket()
+			copy(dataPacket.data, packet[:plen])
+			dataPacket.packetLen = plen
+			pc.Push(dataPacket)
+			//log.Printf("TUN packet received\n")
+		}
+	}(pc)
+}
+
 func runTunWriteThread() {
 	go func() {
 		runtime.LockOSThread()
@@ -113,18 +132,31 @@ func runTunWriteThread() {
 
 func runTunWriteBatchThread() {
 	go func() {
-		for batch := range udpReadBatchChan {
-			for i := 0; i < batch.msgCount; i++ {
-				message := batch.messages[i]
-				bytes := message.Buffers[0][:message.N]
-				_, err := tunInterface.Write(bytes)
-				if err != nil {
-					log.Fatalf("Tun Interface Write: type unknown %+v\n", err)
+		runtime.LockOSThread()
+		var timer *time.Timer
+		bucketSize := 0
+		processedMessages := 0
+		for {
+			select {
+			case batch := <-udpReadBatchChan:
+				bucketSize = batch.msgCount
+				timer = time.NewTimer(1 * time.Millisecond)
+				for i := 0; i < batch.msgCount; i++ {
+					message := batch.messages[i]
+					bytes := message.Buffers[0][:message.N]
+					_, err := tunInterface.Write(bytes)
+					if err != nil {
+						log.Fatalf("Tun Interface Write: type unknown %+v\n", err)
+					}
+					processedMessages = processedMessages + 1
 				}
+				messagesPool.Put(batch)
+				//log.Printf("TUN packet sent\n")
+			case <-timer.C:
+				log.Printf("Tun write stat: %d received, %d processed", bucketSize, processedMessages)
 			}
-			messagesPool.Put(batch)
-			//log.Printf("TUN packet sent\n")
 		}
+
 	}()
 }
 
@@ -274,6 +306,8 @@ func main() {
 		createTun(serverTunIP)
 		createUDPListener(serverUDPIP + ":" + serverUDPPort)
 		createUDPWriter(serverUDPIP + ":" + clientUDPPort)
+		NewPacketCollector(300, udpReadBatchChan).Run()
+		//runTunReadThread()
 		runTunReadThread()
 		runUDPReadThread()
 		runUDPWriteThread(clientUDPIP + ":" + clientUDPPort)
