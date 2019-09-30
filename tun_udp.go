@@ -19,7 +19,7 @@ const (
 )
 
 var serverTunIP net.IP = []byte{10, 0, 1, 254}
-var serverUDPIP string = "192.168.1.120"
+var serverUDPIP string = "192.168.1.95"
 var serverUDPPort string = "5110"
 
 var clientTunIP net.IP = []byte{10, 0, 1, 1}
@@ -37,8 +37,8 @@ var tunInterface *water.Interface
 var udpListenConn net.PacketConn
 var udpWriterConn net.PacketConn
 var tunLink netlink.Link
-var tunReadChan *lfqueue.Queue = lfqueue.NewQueue(1000)
-var udpReadChan *lfqueue.Queue = lfqueue.NewQueue(1000)
+var tunReadChan *lfqueue.Queue = lfqueue.NewQueue(5000)
+var udpReadChan *lfqueue.Queue = lfqueue.NewQueue(5000)
 
 func initPool() {
 	packetPool = &sync.Pool{
