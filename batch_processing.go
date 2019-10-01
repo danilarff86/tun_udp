@@ -77,12 +77,22 @@ func runUDPBatchWriteThread(pc *PacketCollector) {
 				time.AfterFunc(1*time.Millisecond, func() {
 					AddFromTunToUDPCounters(msgCount, processedMsg)
 				})
-				//log.Printf("Messages count %+v", batch)
-				n, err := udpWriterConn.WriteBatch(batch.messages, syscall.MSG_WAITFORONE)
-				if err != nil {
-					log.Fatalf("UDP Interface Write error: %+v\n", err)
+				offset := 0
+				bucketSize := 0
+				for offset < msgCount {
+					if (msgCount-offset)/RCVR_MSG_PACK >= 1 {
+						bucketSize = offset + RCVR_MSG_PACK
+					} else {
+						bucketSize = offset + ((msgCount - offset) % RCVR_MSG_PACK)
+					}
+					//log.Printf("offset: %d, count: %d, bucket: %d", offset, msgCount, bucketSize)
+					n, err := udpWriterConn.WriteBatch(batch.messages[offset:bucketSize], syscall.MSG_WAITFORONE)
+					if err != nil {
+						log.Fatalf("UDP Interface Write error: %+v\n", err)
+					}
+					processedMsg += n
+					offset = bucketSize
 				}
-				processedMsg = n
 			}
 		}
 	}(pc)

@@ -24,11 +24,11 @@ const (
 )
 
 var serverTunIP net.IP = []byte{10, 0, 1, 254}
-var serverUDPIP = "192.168.1.95"
+var serverUDPIP = "192.168.7.38"
 var serverUDPPort = "5110"
 
 var clientTunIP net.IP = []byte{10, 0, 1, 1}
-var clientUDPIP = "192.168.1.90"
+var clientUDPIP = "192.168.7.254"
 var clientUDPPort = "5120"
 
 var dstIP *net.UDPAddr
