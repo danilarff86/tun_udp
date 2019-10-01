@@ -30,7 +30,10 @@ func runTunWriteBatchThread(pc *PacketCollector) {
 		for {
 			select {
 			case batch := <-pc.dstChannel:
+				msgCount := batch.msgCount
+				processedMsg := 0
 				time.AfterFunc(1*time.Millisecond, func() {
+					AddFromUDPToTunCounters(msgCount, processedMsg)
 				})
 				for i := 0; i < batch.msgCount; i++ {
 					message := batch.messages[i]
@@ -40,6 +43,7 @@ func runTunWriteBatchThread(pc *PacketCollector) {
 					if err != nil {
 						log.Fatalf("Tun Interface Write: type unknown %+v\n", err)
 					}
+					processedMsg += 1
 				}
 				messagesPool.Put(batch)
 			}
@@ -50,7 +54,6 @@ func runTunWriteBatchThread(pc *PacketCollector) {
 func runUDPReadBatchThread(pc *PacketCollector) {
 	go func(pc *PacketCollector) {
 		runtime.LockOSThread()
-		//packet := make([]byte, mtu)
 		for {
 			batch := messagesPool.Get().(*Batch)
 			count, err := udpListenConn.ReadBatch(batch.messages, syscall.MSG_WAITFORONE)
@@ -69,11 +72,17 @@ func runUDPBatchWriteThread(pc *PacketCollector) {
 		for {
 			select {
 			case batch := <-pc.dstChannel:
+				msgCount := batch.msgCount
+				processedMsg := 0
+				time.AfterFunc(1*time.Millisecond, func() {
+					AddFromTunToUDPCounters(msgCount, processedMsg)
+				})
 				//log.Printf("Messages count %+v", batch)
-				_, err := udpWriterConn.WriteBatch(batch.messages, 0)
+				n, err := udpWriterConn.WriteBatch(batch.messages, syscall.MSG_WAITFORONE)
 				if err != nil {
 					log.Fatalf("UDP Interface Write error: %+v\n", err)
 				}
+				processedMsg = n
 			}
 		}
 	}(pc)

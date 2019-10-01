@@ -212,7 +212,7 @@ func main() {
 	if argc < 2 {
 		usageString()
 	}
-
+	go RunMonitor()
 	switch os.Args[1] {
 	case "server":
 		dstIP, _ = net.ResolveUDPAddr("udp", clientUDPIP+":"+clientUDPPort)
