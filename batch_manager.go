@@ -2,39 +2,44 @@ package main
 
 import (
 	"golang.org/x/net/ipv4"
-	"sync"
+	"runtime"
 	"sync/atomic"
 	"time"
 )
 
-func NewPacketCollector(bucketSize int, dstChannel chan *Batch) *PacketCollector {
-	batchPool := &sync.Pool{
-		New: func() interface{} {
-			return &Batch{getMessageBuffer(bucketSize), bucketSize}
-		},
-	}
-	return &PacketCollector{
+func RunNewPacketCollector(bucketSize int) *PacketCollector {
+	collector := &PacketCollector{
 		atomicLock:  0,
 		BucketSize:  bucketSize,
-		batchPool:   batchPool,
-		activeBatch: batchPool.Get().(*Batch),
-		dstChannel:  dstChannel,
+		activeBatch: &Batch{make([]ipv4.Message, 0), 0},
+		dstChannel:  make(chan *Batch),
 	}
+	go collector.Run()
+	return collector
 }
 
 type PacketCollector struct {
 	atomicLock  int32
 	BucketSize  int
-	batchPool   *sync.Pool
 	activeBatch *Batch
 	dstChannel  chan *Batch
 }
 
-func (pc *PacketCollector) Push(data []ipv4.Message) {
+func (pc *PacketCollector) PushOne(message ipv4.Message) {
 	for !pc.TryLock() {
-		pc.activeBatch.msgCount = pc.activeBatch.msgCount + len(data)
-		pc.activeBatch.messages = append(pc.activeBatch.messages, data...)
+		runtime.Gosched()
 	}
+	pc.activeBatch.msgCount = pc.activeBatch.msgCount + 1
+	pc.activeBatch.messages = append(pc.activeBatch.messages, message)
+	pc.Unlock()
+}
+
+func (pc *PacketCollector) Push(messages []ipv4.Message) {
+	for !pc.TryLock() {
+		runtime.Gosched()
+	}
+	pc.activeBatch.msgCount = pc.activeBatch.msgCount + len(messages)
+	pc.activeBatch.messages = append(pc.activeBatch.messages, messages...)
 	pc.Unlock()
 }
 
@@ -49,11 +54,14 @@ func (pc *PacketCollector) Run() {
 }
 
 func (pc *PacketCollector) sendActiveBucket() {
-	for !pc.TryLock() {
+	if pc.activeBatch.msgCount > 0 {
+		for !pc.TryLock() {
+			runtime.Gosched()
+		}
 		pc.dstChannel <- pc.activeBatch
-		pc.activeBatch = pc.batchPool.Get().(*Batch)
+		pc.activeBatch = &Batch{make([]ipv4.Message, 0), 0}
+		pc.Unlock()
 	}
-	pc.Unlock()
 }
 
 func (pc *PacketCollector) TryLock() bool {
@@ -62,4 +70,15 @@ func (pc *PacketCollector) TryLock() bool {
 
 func (pc *PacketCollector) Unlock() {
 	atomic.CompareAndSwapInt32(&pc.atomicLock, 1, 0)
+}
+
+func getMessageBuffer(size int) []ipv4.Message {
+	ms := make([]ipv4.Message, size)
+	for i := 0; i < size; i++ {
+		ms[i] = ipv4.Message{
+			OOB:     make([]byte, 10),
+			Buffers: [][]byte{make([]byte, RCVR_BUF_SIZE)},
+		}
+	}
+	return ms
 }

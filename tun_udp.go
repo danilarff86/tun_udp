@@ -10,13 +10,11 @@ import (
 	"os"
 	"runtime"
 	"sync"
-	"syscall"
-	"time"
 )
 
 const (
-	RCVR_BUF_SIZE int = 65536 // Possible to receive jumbo UDP packets
-	RCVR_MSG_PACK int = 300   //Max number of messages in one ReadBatch call
+	RCVR_BUF_SIZE int = 1500 // Possible to receive jumbo UDP packets
+	RCVR_MSG_PACK int = 300  //Max number of messages in one ReadBatch call
 )
 
 const (
@@ -33,26 +31,16 @@ var clientTunIP net.IP = []byte{10, 0, 1, 1}
 var clientUDPIP = "192.168.1.90"
 var clientUDPPort = "5120"
 
-type DataPacket struct {
-	data      []byte
-	packetLen int
-}
-
-type Batch struct {
-	messages []ipv4.Message
-	msgCount int
-}
+var dstIP *net.UDPAddr
 
 var packetPool *sync.Pool
 var messagesPool *sync.Pool
 
 var tunInterface *water.Interface
 var udpListenConn *ipv4.PacketConn
-var udpWriterConn net.PacketConn
+var udpWriterConn *ipv4.PacketConn
 var tunReadChan = make(chan *DataPacket, 1000)
 var udpReadChan = make(chan *DataPacket, 1000)
-
-var udpReadBatchChan = make(chan *Batch)
 
 func initPool() {
 	packetPool = &sync.Pool{
@@ -98,24 +86,6 @@ func runTunReadThread() {
 	}()
 }
 
-func runTunReadBatchThread(pc *PacketCollector) {
-	go func(pc *PacketCollector) {
-		runtime.LockOSThread()
-		var packet = make([]byte, mtu)
-		for {
-			plen, err := tunInterface.Read(packet)
-			if err != nil {
-				log.Fatalf("Tun Interface Read: type unknown %+v\n", err)
-			}
-			dataPacket := getDataPacket()
-			copy(dataPacket.data, packet[:plen])
-			dataPacket.packetLen = plen
-			pc.Push(dataPacket)
-			//log.Printf("TUN packet received\n")
-		}
-	}(pc)
-}
-
 func runTunWriteThread() {
 	go func() {
 		runtime.LockOSThread()
@@ -127,36 +97,6 @@ func runTunWriteThread() {
 			}
 			//log.Printf("TUN packet sent\n")
 		}
-	}()
-}
-
-func runTunWriteBatchThread() {
-	go func() {
-		runtime.LockOSThread()
-		var timer *time.Timer
-		bucketSize := 0
-		processedMessages := 0
-		for {
-			select {
-			case batch := <-udpReadBatchChan:
-				bucketSize = batch.msgCount
-				timer = time.NewTimer(1 * time.Millisecond)
-				for i := 0; i < batch.msgCount; i++ {
-					message := batch.messages[i]
-					bytes := message.Buffers[0][:message.N]
-					_, err := tunInterface.Write(bytes)
-					if err != nil {
-						log.Fatalf("Tun Interface Write: type unknown %+v\n", err)
-					}
-					processedMessages = processedMessages + 1
-				}
-				messagesPool.Put(batch)
-				//log.Printf("TUN packet sent\n")
-			case <-timer.C:
-				log.Printf("Tun write stat: %d received, %d processed", bucketSize, processedMessages)
-			}
-		}
-
 	}()
 }
 
@@ -222,23 +162,6 @@ func runUDPReadThread() {
 	}()
 }
 
-func runUDPReadBatchThread() {
-	go func() {
-		runtime.LockOSThread()
-		//packet := make([]byte, mtu)
-		for {
-			batch := messagesPool.Get().(*Batch)
-			count, err := udpListenConn.ReadBatch(batch.messages, syscall.MSG_WAITFORONE)
-			if err != nil {
-				log.Fatal("UDP Interface Read: type unknown %+v\n", err)
-			}
-			batch.msgCount = count
-			//log.Printf("%d UDP packet received\n", msgsCount)
-			udpReadBatchChan <- batch
-		}
-	}()
-}
-
 func runUDPWriteThread(addrStr string) {
 	addr, err := net.ResolveUDPAddr("", addrStr)
 	if err != nil {
@@ -248,7 +171,7 @@ func runUDPWriteThread(addrStr string) {
 	go func() {
 		runtime.LockOSThread()
 		for pkt := range tunReadChan {
-			_, err := udpWriterConn.WriteTo(pkt.data[:pkt.packetLen], addr)
+			_, err := udpWriterConn.WriteTo(pkt.data[:pkt.packetLen], nil, addr)
 			putDataPacket(pkt)
 			if err != nil {
 				log.Fatalf("UDP Interface Write: type unknown %+v\n", err)
@@ -277,22 +200,11 @@ func createUDPWriter(addrStr string) {
 		log.Fatalf("Unable to open UDP writing socket for addr %s: %+v\n", addrStr, err)
 	}
 	log.Printf("UDP writing conn: %s\n", addrStr)
-	udpWriterConn = conn
+	udpWriterConn = ipv4.NewPacketConn(conn)
 }
 
 func usageString() {
 	log.Fatalf("Usage: %s server|client\n", os.Args[0])
-}
-
-func getMessageBuffer(size int) []ipv4.Message {
-	ms := make([]ipv4.Message, size)
-	for i := 0; i < size; i++ {
-		ms[i] = ipv4.Message{
-			OOB:     make([]byte, 10),
-			Buffers: [][]byte{make([]byte, RCVR_BUF_SIZE)},
-		}
-	}
-	return ms
 }
 
 func main() {
@@ -303,23 +215,37 @@ func main() {
 
 	switch os.Args[1] {
 	case "server":
+		dstIP, _ = net.ResolveUDPAddr("udp", clientUDPIP+":"+clientUDPPort)
 		createTun(serverTunIP)
 		createUDPListener(serverUDPIP + ":" + serverUDPPort)
 		createUDPWriter(serverUDPIP + ":" + clientUDPPort)
-		NewPacketCollector(300, udpReadBatchChan).Run()
 		//runTunReadThread()
-		runTunReadThread()
-		runUDPReadThread()
-		runUDPWriteThread(clientUDPIP + ":" + clientUDPPort)
-		runTunWriteThread()
+		//runUDPReadThread()
+		//runUDPWriteThread(clientUDPIP + ":" + clientUDPPort)
+		//runTunWriteThread()
+
+		tunUdp := RunNewPacketCollector(RCVR_MSG_PACK)
+		runTunReadBatchThread(tunUdp)
+		runUDPBatchWriteThread(tunUdp)
+		udpTun := RunNewPacketCollector(RCVR_MSG_PACK)
+		runUDPReadBatchThread(udpTun)
+		runTunWriteBatchThread(udpTun)
 	case "client":
+		dstIP, _ = net.ResolveUDPAddr("udp", serverUDPIP+":"+serverUDPPort)
 		createTun(clientTunIP)
 		createUDPListener(clientUDPIP + ":" + clientUDPPort)
 		createUDPWriter(clientUDPIP + ":" + serverUDPPort)
-		runTunReadThread()
-		runUDPReadThread()
-		runUDPWriteThread(serverUDPIP + ":" + serverUDPPort)
-		runTunWriteThread()
+		//runTunReadThread()
+		//runUDPReadThread()
+		//runUDPWriteThread(serverUDPIP + ":" + serverUDPPort)
+		//runTunWriteThread()
+
+		tunUdp := RunNewPacketCollector(RCVR_MSG_PACK)
+		runTunReadBatchThread(tunUdp)
+		runUDPBatchWriteThread(tunUdp)
+		udpTun := RunNewPacketCollector(RCVR_MSG_PACK)
+		runUDPReadBatchThread(udpTun)
+		runTunWriteBatchThread(udpTun)
 	default:
 		usageString()
 	}
