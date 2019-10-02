@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const (
@@ -22,10 +23,15 @@ const (
 	tunName string = "tun0"
 	txQLen  int    = 5000
 	mtu     int    = 1500
+
+	protocolOffset         int = 9
+	srcIPOffset            int = 3 * 4
+	dstIPOffset            int = 4 * 4
+	ipHeaderLength         int = 20
 )
 
 var serverTunIP net.IP = []byte{10, 0, 1, 254}
-var serverUDPIP = "192.168.1.95"
+var serverUDPIP = "192.168.1.120"
 var serverUDPPort = "5110"
 
 var clientTunIP net.IP = []byte{10, 0, 1, 1}
@@ -48,10 +54,12 @@ var messagesPool *sync.Pool
 var tunInterface *water.Interface
 var udpListenConn *ipv4.PacketConn
 var udpWriterConn net.PacketConn
-var tunReadChan = make(chan *DataPacket, 1000)
-var udpReadChan = make(chan *DataPacket, 1000)
+var tunReadChan = make(chan *DataPacket, 10)
+var udpReadChan = make(chan *DataPacket, 10)
 
 var udpReadBatchChan = make(chan *Batch)
+
+var pingTimestamp int64
 
 func initPool() {
 	packetPool = &sync.Pool{
@@ -79,6 +87,18 @@ func putDataPacket(p *DataPacket) {
 	packetPool.Put(p)
 }
 
+func handleIcmp(p *DataPacket) {
+	if p.data[protocolOffset] != 1 {
+		return
+	}
+
+	if p.data[ipHeaderLength] == 8 {
+		pingTimestamp = time.Now().UnixNano()
+	} else if p.data[ipHeaderLength] == 0 {
+		log.Printf("Ping delay, ms: %f\n", float64(time.Now().UnixNano() - pingTimestamp)/1000000.)
+	}
+}
+
 func runTunReadThread() {
 	go func() {
 		runtime.LockOSThread()
@@ -91,6 +111,9 @@ func runTunReadThread() {
 			dataPacket := getDataPacket()
 			copy(dataPacket.data, packet[:plen])
 			dataPacket.packetLen = plen
+			/*if len(tunReadChan) == cap(tunReadChan) {
+				log.Printf("tunReadChan is full\n")
+			}*/
 			tunReadChan <- dataPacket
 			//log.Printf("TUN packet received\n")
 		}
@@ -184,6 +207,7 @@ func runUDPReadThread() {
 			dataPacket := getDataPacket()
 			copy(dataPacket.data, packet[:plen])
 			dataPacket.packetLen = plen
+			handleIcmp(dataPacket)
 			udpReadChan <- dataPacket
 			//log.Printf("UDP packet received\n")
 		}
@@ -217,6 +241,7 @@ func runUDPWriteThread(addrStr string) {
 		runtime.LockOSThread()
 		for pkt := range tunReadChan {
 			_, err := udpWriterConn.WriteTo(pkt.data[:pkt.packetLen], addr)
+			handleIcmp(pkt)
 			putDataPacket(pkt)
 			if err != nil {
 				log.Fatalf("UDP Interface Write: type unknown %+v\n", err)
