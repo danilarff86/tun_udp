@@ -10,7 +10,9 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 const (
@@ -25,7 +27,7 @@ const (
 )
 
 var serverTunIP net.IP = []byte{10, 0, 1, 254}
-var serverUDPIP = "192.168.1.95"
+var serverUDPIP = "192.168.1.120"
 var serverUDPPort = "5110"
 
 var clientTunIP net.IP = []byte{10, 0, 1, 1}
@@ -48,10 +50,12 @@ var messagesPool *sync.Pool
 var tunInterface *water.Interface
 var udpListenConn *ipv4.PacketConn
 var udpWriterConn net.PacketConn
-var tunReadChan = make(chan *DataPacket, 1000)
+var tunReadChan = make(chan *DataPacket, 10000)
 var udpReadChan = make(chan *DataPacket, 1000)
 
 var udpReadBatchChan = make(chan *Batch)
+
+var pktTunRecvCnt uint64
 
 func initPool() {
 	packetPool = &sync.Pool{
@@ -91,6 +95,10 @@ func runTunReadThread() {
 			dataPacket := getDataPacket()
 			copy(dataPacket.data, packet[:plen])
 			dataPacket.packetLen = plen
+			atomic.AddUint64(&pktTunRecvCnt, 1)
+			if len(tunReadChan) == cap(tunReadChan) {
+				log.Printf("tunReadChan is full\n")
+			}
 			tunReadChan <- dataPacket
 			//log.Printf("TUN packet received\n")
 		}
@@ -290,7 +298,30 @@ func main() {
 		usageString()
 	}
 
+	const (
+		ticketPeriod int64 = 20
+	)
+
+	ticker := time.NewTicker(time.Duration(ticketPeriod) * time.Millisecond)
+	done := make(chan bool)
+
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case /*t := */ <-ticker.C:
+				log.Printf("Received %d packets in %d milliseconds\n", atomic.LoadUint64(&pktTunRecvCnt), ticketPeriod)
+				atomic.StoreUint64(&pktTunRecvCnt, 0)
+				//log.Printf("Tick at %+v\n", t)
+			}
+		}
+	}()
+
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	wg.Wait()
+
+	ticker.Stop()
+	done <- true
 }
