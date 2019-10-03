@@ -14,7 +14,7 @@ import (
 
 const (
 	RCVR_BUF_SIZE int = 1500 // Possible to receive jumbo UDP packets
-	RCVR_MSG_PACK int = 300  //Max number of messages in one ReadBatch call
+	RCVR_MSG_PACK int = 30   //Max number of messages in one ReadBatch call
 )
 
 const (

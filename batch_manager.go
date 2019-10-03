@@ -54,14 +54,12 @@ func (pc *PacketCollector) Run() {
 }
 
 func (pc *PacketCollector) sendActiveBucket() {
-	if pc.activeBatch.msgCount > 0 {
-		for !pc.TryLock() {
-			runtime.Gosched()
-		}
-		pc.dstChannel <- pc.activeBatch
-		pc.activeBatch = &Batch{make([]ipv4.Message, 0), 0}
-		pc.Unlock()
+	for !pc.TryLock() {
+		runtime.Gosched()
 	}
+	pc.dstChannel <- pc.activeBatch
+	pc.activeBatch = &Batch{make([]ipv4.Message, 0), 0}
+	pc.Unlock()
 }
 
 func (pc *PacketCollector) TryLock() bool {

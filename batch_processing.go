@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"runtime"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -30,22 +31,24 @@ func runTunWriteBatchThread(pc *PacketCollector) {
 		for {
 			select {
 			case batch := <-pc.dstChannel:
-				msgCount := batch.msgCount
-				processedMsg := 0
+				msgCount := int32(batch.msgCount)
+				processedMsg := int32(0)
 				time.AfterFunc(1*time.Millisecond, func() {
 					AddFromUDPToTunCounters(msgCount, processedMsg)
 				})
-				for i := 0; i < batch.msgCount; i++ {
-					message := batch.messages[i]
-					bytes := message.Buffers[0]
-					//log.Printf("Tun Interface Write: %+v\n", batch.msgCount)
-					_, err := tunInterface.Write(bytes)
-					if err != nil {
-						log.Fatalf("Tun Interface Write: type unknown %+v\n", err)
+				if msgCount > 0 {
+					for i := 0; i < batch.msgCount; i++ {
+						message := batch.messages[i]
+						bytes := message.Buffers[0]
+						//log.Printf("Tun Interface Write: %+v\n", batch.msgCount)
+						_, err := tunInterface.Write(bytes)
+						if err != nil {
+							log.Fatalf("Tun Interface Write: type unknown %+v\n", err)
+						}
+						processedMsg += 1
 					}
-					processedMsg += 1
+					messagesPool.Put(batch)
 				}
-				messagesPool.Put(batch)
 			}
 		}
 	}(pc)
@@ -58,7 +61,7 @@ func runUDPReadBatchThread(pc *PacketCollector) {
 			batch := messagesPool.Get().(*Batch)
 			count, err := udpListenConn.ReadBatch(batch.messages, syscall.MSG_WAITFORONE)
 			if err != nil {
-				log.Fatal("UDP Interface Read: type unknown %+v\n", err)
+				log.Fatalf("UDP Interface Read: type unknown %+v\n", err)
 			}
 			batch.msgCount = count
 			pc.Push(batch.messages[:count])
@@ -72,26 +75,28 @@ func runUDPBatchWriteThread(pc *PacketCollector) {
 		for {
 			select {
 			case batch := <-pc.dstChannel:
-				msgCount := batch.msgCount
-				processedMsg := 0
+				msgCount := int32(batch.msgCount)
+				processedMsg := int32(0)
 				time.AfterFunc(1*time.Millisecond, func() {
-					AddFromTunToUDPCounters(msgCount, processedMsg)
+					AddFromTunToUDPCounters(msgCount, atomic.LoadInt32(&processedMsg))
 				})
-				offset := 0
-				bucketSize := 0
-				for offset < msgCount {
-					if (msgCount-offset)/RCVR_MSG_PACK >= 1 {
-						bucketSize = offset + RCVR_MSG_PACK
-					} else {
-						bucketSize = offset + ((msgCount - offset) % RCVR_MSG_PACK)
+				if msgCount > 0 {
+					offset := int32(0)
+					bucketSize := int32(0)
+					for offset < msgCount {
+						if (msgCount-offset)/int32(RCVR_MSG_PACK) >= 1 {
+							bucketSize = offset + int32(RCVR_MSG_PACK)
+						} else {
+							bucketSize = offset + ((msgCount - offset) % int32(RCVR_MSG_PACK))
+						}
+						//log.Printf("offset: %d, count: %d, bucket: %d", offset, msgCount, bucketSize)
+						n, err := udpWriterConn.WriteBatch(batch.messages[offset:bucketSize], syscall.MSG_WAITFORONE)
+						if err != nil {
+							log.Fatalf("UDP Interface Write error: %+v\n", err)
+						}
+						atomic.AddInt32(&processedMsg, int32(n))
+						offset = bucketSize
 					}
-					//log.Printf("offset: %d, count: %d, bucket: %d", offset, msgCount, bucketSize)
-					n, err := udpWriterConn.WriteBatch(batch.messages[offset:bucketSize], syscall.MSG_WAITFORONE)
-					if err != nil {
-						log.Fatalf("UDP Interface Write error: %+v\n", err)
-					}
-					processedMsg += n
-					offset = bucketSize
 				}
 			}
 		}
