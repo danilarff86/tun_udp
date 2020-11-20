@@ -2,21 +2,26 @@ package main
 
 import (
 	"flag"
-	"github.com/matishsiao/go_reuseport"
-	"github.com/songgao/water"
-	"github.com/vishvananda/netlink"
-	"golang.org/x/net/ipv4"
 	"log"
 	"net"
 	"os"
 	"runtime"
 	"sync"
+
+	reuseport "github.com/matishsiao/go_reuseport"
+	"github.com/songgao/water"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/net/ipv4"
 )
 
 const (
-	tunName string = "tun0"
-	txQLen  int    = 5000
-	mtu     int    = 1500
+	tunName        string = "tun0"
+	txQLen         int    = 5000
+	mtu            int    = 1500
+	maxPacketLen   int    = 1460
+	isFullPacket   byte   = 0
+	isFirstPacket  byte   = 1
+	isSecondPacket byte   = 2
 )
 
 var serverTunIP net.IP = []byte{10, 0, 1, 254}
@@ -38,12 +43,21 @@ var udpWriterConn net.PacketConn
 var tunReadChan = make(chan *DataPacket, 1000)
 var udpReadChan = make(chan *DataPacket, 1000)
 
+var firstPacket *DataPacket
+
 func init() {
 	packetPool = &sync.Pool{
 		New: func() interface{} {
-			return &DataPacket{data: make([]byte, mtu), packetLen: 0}
+			return &DataPacket{data: make([]byte, mtu+1), packetLen: 0}
 		},
 	}
+}
+
+func getAllowedPacketLen(plen int) int {
+	if plen > maxPacketLen {
+		return maxPacketLen
+	}
+	return plen
 }
 
 func getDataPacket() *DataPacket {
@@ -63,24 +77,64 @@ func runTunReadThread() {
 			if err != nil {
 				log.Fatalf("Tun Interface Read: type unknown %+v\n", err)
 			}
+
+			allowedLen := getAllowedPacketLen(plen)
 			dataPacket := getDataPacket()
-			copy(dataPacket.data, packet[:plen])
-			dataPacket.packetLen = plen
-			tunReadChan <- dataPacket
+			copy(dataPacket.data[1:], packet[:allowedLen])
+			dataPacket.packetLen = allowedLen + 1
+
+			if plen > maxPacketLen {
+				// log.Printf("TUN: big packet received. Start %d, end %d, len %d\n", packet[0], packet[plen-1], plen)
+				dataPacket.data[0] = isFirstPacket
+				tunReadChan <- dataPacket
+
+				secondPacket := getDataPacket()
+				copy(secondPacket.data[1:], packet[maxPacketLen:plen])
+				secondPacket.packetLen = plen - maxPacketLen + 1
+				secondPacket.data[0] = isSecondPacket
+				tunReadChan <- secondPacket
+			} else {
+				dataPacket.data[0] = isFullPacket
+				tunReadChan <- dataPacket
+			}
 			//log.Printf("TUN packet received\n")
 		}
 	}()
+}
+
+func writeToTun(data []byte) {
+	_, err := tunInterface.Write(data)
+	if err != nil {
+		log.Fatalf("Tun Interface Write: type unknown %+v\n", err)
+	}
 }
 
 func runTunWriteThread() {
 	go func() {
 		runtime.LockOSThread()
 		for pkt := range udpReadChan {
-			_, err := tunInterface.Write(pkt.data[:pkt.packetLen])
-			putDataPacket(pkt)
-			if err != nil {
-				log.Fatalf("Tun Interface Write: type unknown %+v\n", err)
+			switch pkt.data[0] {
+			case isFullPacket:
+				writeToTun(pkt.data[1:pkt.packetLen])
+				putDataPacket(pkt)
+			case isFirstPacket:
+				if firstPacket != nil {
+					putDataPacket(firstPacket)
+				}
+				firstPacket = pkt
+			case isSecondPacket:
+				copy(firstPacket.data[firstPacket.packetLen:], pkt.data[1:pkt.packetLen])
+				firstPacket.packetLen += pkt.packetLen - 1
+
+				writeToTun(firstPacket.data[1:firstPacket.packetLen])
+				// log.Printf("TUN: big packet sent. Start %d, end %d, len %d\n", firstPacket.data[1], firstPacket.data[firstPacket.packetLen-1], firstPacket.packetLen-1)
+				putDataPacket(pkt)
+				putDataPacket(firstPacket)
+				firstPacket = nil
+			default:
+				putDataPacket(pkt)
 			}
+
 			//log.Printf("TUN packet sent\n")
 		}
 	}()
